@@ -1,6 +1,8 @@
 local ambient = require('openmw.ambient')
 local self = require('openmw.self')
 local vfs = require('openmw.vfs')
+local types = require('openmw.types')
+local core = require('openmw.core')
 
 local playerStates = {
   combat = 'combat',
@@ -33,6 +35,8 @@ local gameState = {
 local soundBanks = {}
 local cellNameDictionary = nil
 local regionNameDictionary = nil
+local tilesetNameDictionary = nil
+local nearbyTileset = nil
 
 local hostileActors = {}
 local initialized = false
@@ -56,7 +60,7 @@ local function contains(elements, element)
 end
 
 local function countAvailableTracks(soundBank)
-  if not soundBank.tracks or #soundBank.tracks == 0 then
+  if (not soundBank.tracks or #soundBank.tracks == 0) and (not soundBank.combatTracks or #soundBank.combatTracks == 0) then
     return 0
   end
 
@@ -134,7 +138,7 @@ local function isSoundBankAllowedForCellName(soundBank, cellName, useDictionary)
 
   if soundBank.cellNamePatternsExclude then
     for  _, cellNameExcludePattern in ipairs(soundBank.cellNamePatternsExclude) do
-      if string.find(cellName, cellNameExcludePattern) then
+      if string.find(cellName:lower(), cellNameExcludePattern:lower(), 1, true) then
         return false
       end
     end
@@ -142,11 +146,13 @@ local function isSoundBankAllowedForCellName(soundBank, cellName, useDictionary)
 
   if soundBank.cellNamePatterns then
     for  _, cellNamePattern in ipairs(soundBank.cellNamePatterns) do
-      if string.find(cellName, cellNamePattern) then
+      if string.find(cellName:lower(), cellNamePattern:lower(), 1, true) then
         return true
       end
     end
   end
+
+  return false
 end
 
 local function isSoundBankAllowedForRegionName(soundBank, regionName, useDictionary)
@@ -159,8 +165,45 @@ local function isSoundBankAllowedForRegionName(soundBank, regionName, useDiction
   end
 
   for _, allowedRegionName in ipairs(soundBank.regionNames) do
-    if regionName == allowedRegionName then
+    if regionName:lower() == allowedRegionName:lower() then
       return true
+    end
+  end
+
+  return false
+end
+
+local function isSoundBankAllowedForTilesetName(soundBank, tilesetName, useDictionary)
+  if not soundBank.tilesetPatterns then
+    return false
+  end
+
+  --if useDictionary and tilesetNameDictionary then
+  --  return contains(tilesetNameDictionary[cellName], soundBank)
+  --end
+
+
+  for _, allowedTilesetName in ipairs(soundBank.tilesetPatterns) do
+    for _,record in ipairs(tilesetName) do
+      if string.find(record, allowedTilesetName:lower(), 1, true) then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
+-- Creature names have no dictionary because creatures may or may not be staticly placed.
+local function isSoundBankAllowedForHostileActors(soundBank, actors)
+  if not soundBank.enemyNames then
+    return false
+  end
+  for id, actor in pairs(actors) do
+    for _, allowedCreatureName in ipairs(soundBank.enemyNames) do
+      if types.Creature.record(actor).name:lower() ==  allowedCreatureName:lower() then
+        return true
+      end
     end
   end
 
@@ -186,6 +229,9 @@ local function isSoundBankAllowed(soundBank)
     if not soundBank.combatTracks or #soundBank.combatTracks == 0 then
       return false
     end
+    if soundBank.combatTracks and not isSoundBankAllowedForHostileActors(soundBank, hostileActors) then
+     return false
+    end
   end
 
   if (soundBank.cellNames or soundBank.cellNamePatterns) and not isSoundBankAllowedForCellName(soundBank, gameState.cellName.current, true) then
@@ -196,6 +242,9 @@ local function isSoundBankAllowed(soundBank)
     return false
   end
 
+  if soundBank.tilesetPatterns and not isSoundBankAllowedForTilesetName(soundBank, nearbyTileset, true) then
+    return false
+  end
 
   return true
 end
@@ -336,6 +385,26 @@ local function createRegionNameDictionary(regionNames, soundBanks)
   return dictionary
 end
 
+local function createTilesetNameDictionary(tilesetNames, soundBanks)
+  local dictionary = {}
+
+  print("prefetching tilesets")
+  for cellName, _ in pairs(tilesetNames) do
+    for _, soundBank in ipairs(soundBanks) do
+      if isSoundBankAllowedForTilesetName(soundBank, cellName, tilesetNames, false) then
+        local dict = dictionary[cellName]
+        if not dict then
+          dict = {}
+          dictionary[cellName] = dict
+        end
+        table.insert(dict, soundBank)
+      end
+    end
+  end
+
+  return dictionary
+end
+
 local function onFrame(dt)
   gameState.cellName.current = self.cell and self.cell.name or ""
   gameState.playtime.current = os.time()
@@ -347,7 +416,7 @@ local function onFrame(dt)
   end
 
   if hasGameStateChanged() then
-    newMusic()
+    core.sendGlobalEvent("getNearbyStatics", gameState.cellName.current)
   end
 
   gameState.cellName.previous = gameState.cellName.current
@@ -379,7 +448,18 @@ local function globalDataCollected(eventData)
     regionNameDictionary = createRegionNameDictionary(data.regionNames, soundBanks)
   end
 
+  --if data.tilesetNames then
+  --  tilesetNameDictionary = createTilesetNameDictionary(data.tilesetNames, soundBanks)
+  --end
+
   data = nil
+end
+
+local function tilesetDataCollected(eventData)
+  local data = eventData.data
+  print("collecting tileset data")
+  nearbyTileset = data.tilesetNames
+  newMusic()
 end
 
 local function initialize()
@@ -407,6 +487,7 @@ return {
   eventHandlers = {
     engaging = engaging,
     disengaging = disengaging,
-    globalDataCollected = globalDataCollected
+    globalDataCollected = globalDataCollected,
+    tilesetDataCollected = tilesetDataCollected
   },
 }
